@@ -15,6 +15,12 @@ let sweepResult = null;
 let sweepView = { quantity: "voltage", target: null };
 // 最近一次端口等效结果；节点表结构变更后立即失效（置 null）
 let theveninResult = null;
+// 最近一次成功的求解结果：敏感度分析的目标下拉由此填充，节点表变更后失效
+let lastSolve = null;
+// 最近一次敏感度分析结果；节点表结构变更后立即失效（置 null）
+let sensitivityResult = null;
+// 敏感度目标下拉当前选择（跨目标类型切换时尽量保留同编号）
+let sensView = { quantity: "voltage", target: null };
 // 端口下拉当前值（随节点表重建而保留 / 兜底）
 let portSel = { p: "1", n: "0" };
 // 上一次渲染端口下拉时的节点表签名，用于识别“节点变更”
@@ -115,8 +121,9 @@ function fillPortSelect(select, current) {
 
 function renderPortSelects() {
   if (currentNodeSig() !== nodeSig) {
-    // 节点表结构（数量 / 编号 / 顺序）发生变化：旧的端口等效结果失效
+    // 节点表结构（数量 / 编号 / 顺序）发生变化：旧的端口等效 / 敏感度结果失效
     invalidateThevenin();
+    invalidateSensitivity();
     nodeSig = currentNodeSig();
   }
   // 端点缺失时保留下拉中的红字“（缺失）”选项，不静默改值（与元件端点下拉一致）
@@ -132,6 +139,73 @@ function invalidateThevenin() {
   fb.classList.add("hidden");
   fb.innerHTML = "";
 }
+
+/* ------------------------------ 元件敏感度分析 ------------------------------ */
+function setSensitivityFormEnabled(enabled) {
+  // 求解成功前 / 节点表变更后：目标下拉与提交按钮不可用
+  const disabled = !enabled;
+  $("#sens-quantity").disabled = disabled;
+  $("#sens-target").disabled = disabled;
+  $("#sens-ratio").disabled = disabled;
+  $("#btn-sensitivity").disabled = disabled;
+  if (!enabled) {
+    $("#sens-target").innerHTML = "";
+  }
+}
+
+function resetSensitivityTargets() {
+  // 按当前目标类型重建目标下拉（节点来自节点表，支路来自元件表）
+  const sel = $("#sens-target");
+  const quantity = $("#sens-quantity").value;
+  $("#sens-target-label").textContent = quantity === "voltage" ? "目标节点" : "目标支路";
+  sel.innerHTML = "";
+  if (quantity === "voltage") {
+    state.nodes.forEach((n) => sel.appendChild(el("option", { value: n.id, text: n.id })));
+  } else {
+    state.elements.forEach((e) =>
+      sel.appendChild(
+        el("option", {
+          value: e.id,
+          text: `${e.id || "(未命名)"}（${e.type} ${e.node_p}→${e.node_n}）`,
+        })
+      )
+    );
+  }
+  const values = [...sel.options].map((o) => o.value);
+  if (sensView.quantity === quantity && sensView.target && values.includes(sensView.target)) {
+    sel.value = sensView.target;
+  } else {
+    sel.value = values[0] || "";
+  }
+  sensView = { quantity, target: sel.value };
+}
+
+function invalidateSensitivity() {
+  // 节点表结构变更：清空旧结果，最近一次求解也不再与当前节点表对应
+  sensitivityResult = null;
+  lastSolve = null;
+  $("#sensitivity-result").classList.add("hidden");
+  const fb = $("#sensitivity-feedback");
+  fb.classList.add("hidden");
+  fb.innerHTML = "";
+  setSensitivityFormEnabled(false);
+}
+
+function resetSensitivity() {
+  // 载入示例 / 清空：彻底重置（含当前选择与输入比例）
+  invalidateSensitivity();
+  sensView = { quantity: "voltage", target: null };
+  $("#sens-quantity").value = "voltage";
+  $("#sens-ratio").value = "0.1";
+}
+
+$("#sens-quantity").addEventListener("change", () => {
+  if (!lastSolve) return;
+  resetSensitivityTargets();
+});
+$("#sens-target").addEventListener("change", (ev) => {
+  sensView.target = ev.target.value;
+});
 
 $("#port-p").addEventListener("change", (ev) => {
   portSel.p = ev.target.value;
@@ -247,6 +321,8 @@ function renderAll() {
   renderGroundSelect();
   renderPortSelects();
   renderSweepElements();
+  // 元件行增删后刷新敏感度支路目标（节点表变更已在 renderPortSelects 中禁用表单）
+  if (lastSolve) resetSensitivityTargets();
   clearFeedback();
 }
 
@@ -326,6 +402,7 @@ document.querySelectorAll("[data-sample]").forEach((btn) => {
     };
     resetSweep();
     resetThevenin();
+    resetSensitivity();
     portSel = { p: s.nodes.length > 1 ? s.nodes[1].id : "", n: s.nodes[0]?.id || "" };
     nodeSig = "";
     renderAll();
@@ -337,6 +414,7 @@ $("#btn-clear").addEventListener("click", () => {
   state = { ground: "", nodes: [], elements: [] };
   resetSweep();
   resetThevenin();
+  resetSensitivity();
   portSel = { p: "", n: "" };
   nodeSig = "";
   renderAll();
@@ -606,8 +684,16 @@ $("#btn-solve").addEventListener("click", async () => {
   if (resp.ok && data.ok) {
     renderResults(data);
     showWarnings(data.warnings);
+    // 求解成功：启用敏感度表单并按最近一次求解填充目标下拉
+    lastSolve = data;
+    $("#sens-quantity").value = sensView.quantity || "voltage";
+    setSensitivityFormEnabled(true);
+    resetSensitivityTargets();
   } else {
     showErrors(data.errors || [{ code: "server", message: "求解失败", items: [] }]);
+    // 求解失败时旧结果仍按“节点表变更”规则处理，这里仅禁用敏感度入口
+    lastSolve = null;
+    setSensitivityFormEnabled(false);
   }
 });
 
@@ -773,6 +859,274 @@ $("#btn-thevenin").addEventListener("click", async () => {
     btn.textContent = "🔌 计算端口等效";
   }
 });
+
+/* ------------------------------ 元件敏感度分析 ------------------------------ */
+const SENS_STAGE_LABEL = {
+  baseline: "基准网络求解",
+};
+const SENS_SIDE_LABEL = { plus: "正扰动 +h", minus: "负扰动 −h", both: "正/负扰动" };
+
+function showSensitivityFeedback(errors) {
+  const fb = $("#sensitivity-feedback");
+  fb.innerHTML = "";
+  (errors || []).forEach((g) => {
+    const group = el("div", { class: "err-group" });
+    const tag = g.stage && SENS_STAGE_LABEL[g.stage] ? `［${SENS_STAGE_LABEL[g.stage]}］` : "";
+    group.appendChild(el("div", { class: "err-title", text: `● ${tag}${g.message}` }));
+    if (g.items && g.items.length) {
+      const ul = el("ul");
+      g.items.forEach((item) => {
+        if (item.ref) {
+          ul.appendChild(
+            el("li", {}, [
+              el("span", { class: "err-ref", text: item.ref + "：" }),
+              document.createTextNode(item.detail),
+            ])
+          );
+        } else if (item.nodes) {
+          ul.appendChild(
+            el("li", {}, [
+              document.createTextNode("子网节点："),
+              el("span", { class: "err-nodes", text: item.nodes.join("、") }),
+            ])
+          );
+        } else {
+          ul.appendChild(el("li", { text: item.detail || JSON.stringify(item) }));
+        }
+      });
+      group.appendChild(ul);
+    }
+    fb.appendChild(group);
+  });
+  $("#sensitivity-result").classList.add("hidden");
+  fb.classList.remove("hidden");
+}
+
+function clearSensitivityFeedback() {
+  const fb = $("#sensitivity-feedback");
+  fb.classList.add("hidden");
+  fb.innerHTML = "";
+}
+
+function validateSensitivityForm() {
+  const items = [];
+  const quantity = $("#sens-quantity").value;
+  const target = $("#sens-target").value;
+  const ratioPctRaw = $("#sens-ratio").value;
+  const ratioPct = Number(ratioPctRaw);
+
+  if (!lastSolve) items.push("请先点击“校核求解”并成功求解当前网络");
+  if (quantity !== "voltage" && quantity !== "current")
+    items.push("目标类型必须是节点电压或支路电流");
+  if (!target) {
+    items.push(quantity === "current" ? "请选择目标支路" : "请选择目标节点");
+  } else if (quantity === "voltage" && !nodeIds().includes(target)) {
+    items.push(`目标节点“${target}”不在节点表中`);
+  } else if (quantity === "current" && !state.elements.some((e) => e.id === target)) {
+    items.push(`目标支路“${target}”不在元件表中`);
+  }
+  if (ratioPctRaw === "" || !Number.isFinite(ratioPct)) {
+    items.push(`相对扰动比例“${ratioPctRaw}”必须是数字`);
+  } else if (ratioPct < 0.01 || ratioPct > 10) {
+    items.push("相对扰动比例必须在 0.01%～10% 之间");
+  }
+
+  if (items.length) {
+    showSensitivityFeedback([
+      { code: "sensitivity_validation", message: "敏感度参数未通过校验：" + items.join("；"), items: [] },
+    ]);
+    return null;
+  }
+  return { quantity, target, ratio: ratioPct / 100 };
+}
+
+$("#btn-sensitivity").addEventListener("click", async () => {
+  clearSensitivityFeedback();
+  const spec = validateSensitivityForm();
+  if (!spec) return;
+
+  const btn = $("#btn-sensitivity");
+  btn.disabled = true;
+  btn.textContent = "计算中（每个元件需求解两次）…";
+  try {
+    const payload = buildPayload();
+    payload.sensitivity = spec;
+
+    let resp;
+    try {
+      resp = await fetch("/api/sensitivity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      showSensitivityFeedback([{ code: "network", message: `网络请求失败：${err}`, items: [] }]);
+      return;
+    }
+
+    let data;
+    try {
+      data = await resp.json();
+    } catch (err) {
+      showSensitivityFeedback([{ code: "server", message: "服务端返回了无法解析的内容", items: [] }]);
+      return;
+    }
+
+    if (resp.ok && data.ok) {
+      sensitivityResult = data;
+      renderSensitivityResult(data);
+    } else {
+      sensitivityResult = null;
+      $("#sensitivity-result").classList.add("hidden");
+      showSensitivityFeedback(
+        data.errors || [{ code: "server", message: "敏感度分析失败", items: [] }]
+      );
+    }
+  } finally {
+    btn.disabled = !lastSolve;
+    btn.textContent = "🎯 计算元件敏感度";
+  }
+});
+
+function renderSensitivityResult(r) {
+  const meta = r.sensitivity;
+  const ratioPct = meta.ratio * 100;
+  const failedCount = r.counts.failed;
+  $("#sensitivity-meta").textContent =
+    `目标：${meta.target_name} = ${fmt(meta.target_base)} ${meta.target_unit}　` +
+    `扰动 ±${fmt(ratioPct)}%　共 ${r.counts.total} 个元件` +
+    (failedCount ? `（成功 ${r.counts.ok}，失败 ${failedCount}）` : "");
+
+  // 概要行
+  const summary = $("#sensitivity-summary");
+  summary.innerHTML = "";
+  const chip = (k, v, cls = "") =>
+    el("span", { class: "sens-chip" }, [
+      el("span", { class: "k", text: k }),
+      el("span", { class: "v " + cls, text: v }),
+    ]);
+  summary.appendChild(chip("分析目标", `${meta.target_name}`));
+  summary.appendChild(chip("基准值 F₀", `${fmt(meta.target_base)} ${meta.target_unit}`));
+  summary.appendChild(chip("相对扰动 h", `±${fmt(ratioPct)}%`));
+  summary.appendChild(
+    chip("成功 / 失败", `${r.counts.ok} / ${failedCount}`, failedCount ? "num-neg" : "")
+  );
+
+  const tbody = $("#sensitivity-table tbody");
+  tbody.innerHTML = "";
+  const ranked = r.elements.filter((e) => e.status === "ok" && e.sensitivity !== null);
+  const maxAbs = ranked.reduce((m, e) => Math.max(m, Math.abs(e.sensitivity)), 0);
+
+  r.elements.forEach((e) => {
+    const tr = el("tr", { class: e.status === "ok" ? "" : "row-fail" });
+
+    // 排名
+    tr.appendChild(el("td", { text: e.rank === null ? "—" : String(e.rank) }));
+    // 元件
+    const idTd = el("td");
+    idTd.appendChild(el("b", { text: e.id }));
+    idTd.appendChild(el("div", { class: "sens-sub", text: `${e.node_p} → ${e.node_n}` }));
+    tr.appendChild(idTd);
+    // 类型
+    tr.appendChild(
+      el("td", {}, [el("span", { class: `badge badge-${e.type.toLowerCase()}`, text: e.type })])
+    );
+    // 基准参数
+    tr.appendChild(el("td", { text: `${fmt(e.base_value)} ${TYPE_UNIT[e.type] || ""}`.trim() }));
+
+    if (e.status !== "ok") {
+      // 失败项：扰动值 / 导数 / 灵敏度列合并展示“—”，最后一列列结构化原因
+      tr.appendChild(el("td", { class: "num-neg", text: "—" }));
+      tr.appendChild(el("td", { class: "num-neg", text: "—" }));
+      tr.appendChild(el("td", { class: "num-neg", text: "—" }));
+      tr.appendChild(el("td", { class: "num-neg", text: "—" }));
+      const stTd = el("td");
+      stTd.appendChild(
+        el("span", { class: `status-tag status-err`, text: `失败${e.side ? `（${SENS_SIDE_LABEL[e.side] || e.side}）` : ""}` })
+      );
+      const ul = el("ul", { class: "point-errors" });
+      (e.errors || []).forEach((g) => {
+        const sideTag = g.side && SENS_SIDE_LABEL[g.side] ? `［${SENS_SIDE_LABEL[g.side]}］` : "";
+        if (g.items && g.items.length) {
+          g.items.forEach((item) =>
+            ul.appendChild(
+              el("li", {
+                text: sideTag + (item.ref ? `${item.ref}：${item.detail}` : item.detail || g.message),
+              })
+            )
+          );
+        } else {
+          ul.appendChild(el("li", { text: sideTag + g.message }));
+        }
+      });
+      stTd.appendChild(ul);
+      tr.appendChild(stTd);
+      tbody.appendChild(tr);
+      return;
+    }
+
+    // 负扰动 / 正扰动目标值（标题附带扰动后的参数值）
+    const valUnit = TYPE_UNIT[e.type] || "";
+    const minusTd = el("td");
+    minusTd.appendChild(
+      el("span", { class: e.target_minus < 0 ? "num-neg" : "", text: fmt(e.target_minus) })
+    );
+    minusTd.title = `参数 p(1−h) = ${fmt(e.value_minus)} ${valUnit}`;
+    minusTd.appendChild(el("div", { class: "sens-sub", text: `p=${fmt(e.value_minus)} ${valUnit}` }));
+    tr.appendChild(minusTd);
+
+    const plusTd = el("td");
+    plusTd.appendChild(
+      el("span", { class: e.target_plus < 0 ? "num-neg" : "", text: fmt(e.target_plus) })
+    );
+    plusTd.title = `参数 p(1+h) = ${fmt(e.value_plus)} ${valUnit}`;
+    plusTd.appendChild(el("div", { class: "sens-sub", text: `p=${fmt(e.value_plus)} ${valUnit}` }));
+    tr.appendChild(plusTd);
+
+    // 导数（有量纲：目标单位 / 参数单位）
+    tr.appendChild(
+      el("td", {
+        class: e.derivative < 0 ? "num-neg" : "",
+        text: `${fmt(e.derivative)} ${meta.target_unit}/${valUnit || "?"}`,
+      })
+    );
+
+    // 归一化灵敏度：数值 + 横向条形
+    const sTd = el("td");
+    if (e.sensitivity === null) {
+      sTd.appendChild(el("span", { class: "num-neg", text: "—" }));
+      sTd.appendChild(el("div", { class: "sens-sub", text: "目标基准为 0，仅可看导数" }));
+    } else {
+      const s = e.sensitivity;
+      sTd.appendChild(
+        el("span", {
+          class: "sens-val " + (s < 0 ? "num-neg" : ""),
+          text: fmt(s),
+        })
+      );
+      const widthPct = maxAbs > 0 ? Math.max(2, Math.abs(s) / maxAbs * 100) : 0;
+      const bar = el("div", { class: "sens-bar" }, [
+        el("div", {
+          class: "sens-bar-fill " + (s < 0 ? "sens-bar-neg" : "sens-bar-pos"),
+          style: `width:${widthPct.toFixed(1)}%`,
+        }),
+      ]);
+      sTd.appendChild(bar);
+      sTd.appendChild(
+        el("div", { class: "sens-sub", text: `参数 +1% → 目标约 ${fmt(s)}%` })
+      );
+    }
+    tr.appendChild(sTd);
+
+    tr.appendChild(
+      el("td", {}, [el("span", { class: "status-tag status-ok", text: "成功" })])
+    );
+    tbody.appendChild(tr);
+  });
+
+  $("#sensitivity-feedback").classList.add("hidden");
+  $("#sensitivity-result").classList.remove("hidden");
+}
 
 /* ------------------------------ 单参数扫描 ------------------------------ */
 function showSweepError(message) {

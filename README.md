@@ -42,6 +42,28 @@
     前端按阶段展示，**不展示任何半截伪结果**。
   - 计算在网络副本上进行，不改写元件表；**节点表发生变更（增删 / 改名）后，
     旧的端口等效结果自动失效隐藏**，需重新计算。
+- **元件敏感度分析**：在网络**校核求解成功**后，选择一个**节点电压**或
+  **支路电流**目标，并给出**相对扰动比例**（`0.01%～10%`）。后端对元件表中的
+  **每个 R / I / V 元件**，在网络副本上分别施加 `+h` 与 `−h` 的同幅相对扰动
+  （参数由 `p` 变为 `p·(1±h)`），各复用一次 MNA 求解，以**中心差分**
+
+  ```
+  dF/dp ≈ ( F(p·(1+h)) − F(p·(1−h)) ) / (2·p·h)
+  S     = (p / F₀) · dF/dp          # 归一化（相对）灵敏度
+  ```
+
+  计算目标对每个元件参数的灵敏度：`S` 表示元件参数每相对变化 1% 时目标值
+  近似相对变化百分之几（负号为反向变化）。
+  - 返回每个元件的**正/负扰动目标值、扰动后参数、有量纲导数 dF/dp、
+    归一化灵敏度 S 与排名**，结果按 `|S|` 从大到小排序，失败项垫底；
+  - **基准网络求解失败**（无接地 / 浮置子网 / 电压源冲突 / 奇异）时整体
+    返回 `422`，错误分组带 `stage: "baseline"`；**单个元件的任一扰动失败**
+    （如基准参数为 0、扰动后网络无唯一解）时只标记该元件并附带
+    `side`（`plus` / `minus` / `both`）的结构化错误，**继续完成其它元件**；
+  - 目标基准值 `F₀ = 0` 时无法归一化，`S` 返回 `null`、不参与排名，
+    但仍给出有量纲导数；
+  - 分析在深拷贝上进行，不改写元件表；**节点表发生变更（增删 / 改名）后
+    旧结果自动清空**，且需重新校核求解后才能再次发起分析。
 
 ## 元件方向约定
 
@@ -69,7 +91,8 @@ docker compose up --build
 API：
 
 - `GET  /api/meta`：容量与元件类型元信息（含 `sweep_min_points` /
-  `sweep_max_points`，即 2 / 101）；
+  `sweep_max_points`，即 2 / 101，以及 `sensitivity_min_ratio` /
+  `sensitivity_max_ratio`，即 `0.0001` / `0.1`）；
 - `POST /api/solve`：请求体为网络 JSON（见下），成功返回 `200`，
   输入或结构问题返回 `422`，错误按 `no_ground / floating_subnet / voltage_conflict / validation`
   分组列出；
@@ -84,6 +107,13 @@ API：
   失败，同样返回 `422`，错误分组沿用 `/api/solve` 的
   `no_ground / floating_subnet / voltage_conflict / singular / validation` 编码，
   并额外带 `stage` 字段标明失败阶段；成功返回 `200`。
+- `POST /api/sensitivity`：元件敏感度分析。请求体与 `/api/solve` 相同，另加一个
+  `sensitivity` 段（见下）。**敏感度参数本身非法**（缺少 `sensitivity` 段、
+  目标类型不是 `voltage` / `current`、目标节点 / 支路不存在、相对扰动比例不在
+  `0.0001～0.1` 等）时返回 `422` 且错误码为 `sensitivity_validation`；参数合法但
+  **基准网络无唯一解**时同样返回 `422`，错误分组沿用 `/api/solve` 的编码并带
+  `stage: "baseline"`；基准可解时恒返回 `200`，各元件的正/负扰动失败以
+  `status: "error"` 与带 `side` 标记的错误分组内联在 `elements[]` 中，不影响其它元件。
 
 停止服务：
 
@@ -285,6 +315,136 @@ R_eq 为 10 Ω ∥ 20 Ω = 20/3 Ω。）
 | 原网络无接地 / 浮置子网 / 电压源冲突 / 奇异 / 输入非法 | `422`，原错误分组 + `stage:"open_circuit"` |
 | 置零加测试源后的网络无唯一解（防御性，正常无源网络应可解） | `422`，原错误分组 + `stage:"equivalent_resistance"` |
 
+## 元件敏感度分析
+
+### 页面操作
+
+1. 按常规录入网络（可先“载入示例①”），先点击 **▶ 校核求解** 并成功——
+   求解成功后左下「元件敏感度分析」卡片的目标下拉才会启用；
+2. 在「目标类型」中选择 **节点电压 (V)** 或 **支路电流 (A)**，并在右侧下拉中
+   选定具体**目标节点**或**目标支路**（支路以“编号 + p→n”标注，与支路电流表一致）；
+3. 填写**相对扰动比例**（百分数，`0.01%～10%`，默认 `0.1%`；正负两侧同幅），
+   点击「计算元件敏感度」。后端对每个 R / I / V 元件各求解两次（共约 2N+1 次 MNA），
+   右侧结果表给出：
+   - **排名**（按 `|归一化灵敏度|` 从大到小，仅成功且可归一化的元件有排名）；
+   - 元件编号 / 类型 / 基准参数；
+   - **负扰动目标值 / 正扰动目标值**（副行标出该侧扰动后的参数值 `p·(1∓h)`）；
+   - **导数 dF/dp**（中心差分，量纲为“目标单位 / 参数单位”）；
+   - **归一化灵敏度 S**：参数每相对变化 1% 时目标近似相对变化的百分数，
+     并附按 `|S|` 归一的横向条形（蓝色为正、橙色为负）；
+   - 状态与失败原因：失败元件整行标红，错误信息带**正扰动 / 负扰动**侧标记，
+     成功元件继续给出完整数值。
+4. 顶部概要行显示分析目标、基准值 F₀、扰动比例与成功 / 失败计数；
+   **节点表一旦变更**（添加 / 删除节点、修改节点编号、载入示例、清空），
+   旧结果立即清空、表单回到禁用状态，需重新校核求解；仅修改元件参数 / 类型 / 端点
+   或接地选择不会自动清空，但需重新求解后再分析。
+
+### 计算定义
+
+对元件参数 `p`、目标量 `F`，取相对扰动步长 `h = ratio`，中心差分：
+
+```
+dF/dp ≈ ( F(p·(1+h)) − F(p·(1−h)) ) / (2·p·h)
+S     = (p / F₀) · dF/dp = (F+ − F−) / (2·h·F₀)
+```
+
+- `S > 0`：参数增大时目标增大；`S < 0`：参数增大时目标减小。
+  例如分压器 `V₂ = V₁·R₂/(R₁+R₂)`：`S(V₂,R₁) = −R₁/(R₁+R₂)`、
+  `S(V₂,R₂) = +R₁/(R₁+R₂)`、`S(V₂,V₁) = 1`。
+- `F₀ = 0`（如目标取接地节点电压）时 `S` 无定义，返回 `null` 且不排名，
+  仅展示有量纲导数；该类元件排在有灵敏度的元件之后、失败元件之前。
+- 元件基准参数为 0（零值电流源 / 电压源）时无法定义相对扰动，该元件直接标记
+  `status:"error"`（`code:"zero_parameter"`、`side:"both"`），其余元件照常分析。
+- 所有计算在网络**深拷贝**上进行，元件表数值不会被改写。
+
+### 请求体与返回结构
+
+在网络 JSON 中追加 `sensitivity` 段：
+
+```bash
+curl -s -X POST http://localhost:8000/api/sensitivity \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "ground": "0",
+    "nodes": ["0", "1", "2"],
+    "elements": [
+      {"id": "V1", "type": "V", "node_p": "1", "node_n": "0", "value": 10},
+      {"id": "R1", "type": "R", "node_p": "1", "node_n": "2", "value": 10},
+      {"id": "R2", "type": "R", "node_p": "2", "node_n": "0", "value": 20}
+    ],
+    "sensitivity": {"quantity": "voltage", "target": "2", "ratio": 0.001}
+  }'
+```
+
+返回（`200`，节选）：
+
+```json
+{
+  "ok": true,
+  "sensitivity": {
+    "quantity": "voltage", "target": "2",
+    "target_name": "节点 2 电压", "target_unit": "V",
+    "target_base": 6.666666666666667, "ratio": 0.001
+  },
+  "elements": [
+    {"id": "V1", "type": "V", "node_p": "1", "node_n": "0", "index": 0,
+     "base_value": 10.0, "status": "ok",
+     "value_minus": 9.99, "value_plus": 10.01,
+     "target_minus": 6.66, "target_plus": 6.673333333333332,
+     "derivative": 0.6666666666665932, "sensitivity": 0.99999999999989,
+     "rank": 1}
+  ],
+  "counts": {"total": 3, "ok": 3, "failed": 0},
+  "warnings": []
+}
+```
+
+- `elements[]` 已按 `|sensitivity|` 降序排列，`rank` 从 1 开始连续编号；
+  失败元件与 `sensitivity: null` 的元件 `rank` 为 `null`。
+- 成功元件含 `base_value / value_minus / value_plus / target_minus /
+  target_plus / derivative / sensitivity` 全部数值字段。
+- 失败元件形如：
+
+```json
+{"id": "I0", "type": "I", "node_p": "1", "node_n": "0", "index": 0,
+ "base_value": 0.0, "status": "error", "side": "both", "rank": null,
+ "errors": [{"code": "zero_parameter", "side": "both",
+             "message": "元件 I0 的基准参数值为 0，无法施加相对扰动……", "items": []}]}
+```
+
+- 敏感度参数非法时返回 `422 sensitivity_validation`：
+
+```json
+{"ok": false,
+ "errors": [{"code": "sensitivity_validation",
+             "message": "敏感度参数未通过校验",
+             "items": [{"ref": "相对扰动比例",
+                        "detail": "相对扰动比例必须在 0.01%～10% 之间（当前：50%）"}]}]}
+```
+
+- 基准网络无唯一解时返回 `422`，错误分组与 `/api/solve` 完全相同，只是多了
+  `stage: "baseline"`：
+
+```json
+{"ok": false,
+ "errors": [{"code": "no_ground", "stage": "baseline",
+             "message": "未指定接地节点：节点电压缺少参考点，无法求解", "items": []}]}
+```
+
+### 校验 / 失败规则汇总
+
+| 情形 | 处理 |
+| ---- | ---- |
+| 缺少 `sensitivity` 段 | 拒绝分析（`422 sensitivity_validation`） |
+| `quantity` 不是 `voltage` / `current` | 拒绝分析 |
+| `target` 为空，或目标节点 / 支路不在网络中 | 拒绝分析（指名目标） |
+| `ratio` 不是有限数字（含布尔值） | 拒绝分析 |
+| `ratio` 超出 `0.0001～0.1`（即 0.01%～10%） | 拒绝分析 |
+| 基准网络无接地 / 浮置子网 / 电压源冲突 / 奇异 / 输入非法 | `422`，原错误分组 + `stage:"baseline"` |
+| 元件基准参数为 0，无法相对扰动 | 该元件 `status:"error"`（`zero_parameter`，`side:"both"`），其它继续 |
+| 元件正 / 负扰动后网络无唯一解 | 该元件 `status:"error"`，错误分组带 `side:"plus"` / `"minus"`，其它继续 |
+| 目标基准值 F₀ = 0 | 元件照常成功，`sensitivity:null`、不排名，仅返回导数 |
+
 ## 本地开发（不使用 Docker）
 
 ```bash
@@ -298,17 +458,19 @@ uvicorn app.main:app --reload --port 8000
 ```
 .
 ├── app/
-│   ├── main.py            # FastAPI 路由（/api/solve、/api/sweep、/api/thevenin）与静态文件
+│   ├── main.py            # FastAPI 路由（solve / sweep / thevenin / sensitivity）与静态文件
 │   ├── solver.py          # MNA 组装、结构诊断与求解
 │   ├── sweep.py           # 单参数扫描：校验 + 逐点复用 solve
 │   ├── thevenin.py        # 两节点端口戴维南等效：开路电压 + 置零注入测试电流
+│   ├── sensitivity.py     # 元件敏感度：逐元件 ±h 扰动 + 中心差分归一化灵敏度
 │   └── static/
-│       ├── index.html     # 页面结构（含扫描、端口等效表单与结果区）
-│       ├── style.css      # 样式与高亮（含扫描曲线、端口等效样式）
-│       └── app.js         # 表格编辑、校验、单次求解、扫描与端口等效交互
+│       ├── index.html     # 页面结构（含扫描、敏感度、端口等效表单与结果区）
+│       ├── style.css      # 样式与高亮（含扫描曲线、敏感度条形、端口等效样式）
+│       └── app.js         # 表格编辑、校验、单次求解、扫描、敏感度与端口等效交互
 ├── test_solver.py         # 求解器冒烟测试：python3 test_solver.py
 ├── test_sweep.py          # 扫描冒烟测试：python3 test_sweep.py
 ├── test_thevenin.py       # 端口等效冒烟测试：python3 test_thevenin.py
+├── test_sensitivity.py    # 敏感度冒烟测试：python3 test_sensitivity.py
 ├── Dockerfile
 ├── compose.yaml
 └── requirements.txt

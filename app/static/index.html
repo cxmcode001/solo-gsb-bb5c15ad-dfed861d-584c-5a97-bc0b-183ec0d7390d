@@ -10,7 +10,7 @@
   <header class="topbar">
     <div class="topbar-inner">
       <h1>直流网络校核器</h1>
-      <p class="subtitle">改进节点分析（MNA）· 节点电压 / 支路电流 / 功率平衡校核 · 参数扫描 · 端口戴维南等效</p>
+      <p class="subtitle">改进节点分析（MNA）· 节点电压 / 支路电流 / 功率平衡校核 · 参数扫描 · 元件敏感度分析 · 端口戴维南等效</p>
     </div>
   </header>
 
@@ -133,6 +133,36 @@
         <div id="thevenin-feedback" class="error-panel hidden"></div>
       </div>
 
+      <div class="card">
+        <div class="card-head">
+          <h2>元件敏感度分析</h2>
+        </div>
+        <div class="sweep-form">
+          <label class="sweep-field">
+            <span>目标类型</span>
+            <select id="sens-quantity" class="input" disabled>
+              <option value="voltage">节点电压 (V)</option>
+              <option value="current">支路电流 (A)</option>
+            </select>
+          </label>
+          <label class="sweep-field">
+            <span id="sens-target-label">目标节点</span>
+            <select id="sens-target" class="input" disabled></select>
+          </label>
+          <label class="sweep-field sweep-field-wide">
+            <span>相对扰动比例（0.01%～10%，正/负同幅）</span>
+            <input id="sens-ratio" class="input" type="number" step="any" min="0.01" max="10" value="0.1" disabled />
+          </label>
+        </div>
+        <p class="hint">
+          对每个 R / I / V 元件在网络副本上分别施加 ±h 的相对参数扰动并复用 MNA 求解，
+          以中心差分计算目标对元件参数的<b>归一化灵敏度</b>（参数每相对变化 1% 时目标近似相对变化百分之几）。
+          结果按 |灵敏度| 排序；基准网络必须先校核求解成功，单个元件扰动失败不影响其它元件。
+        </p>
+        <button class="btn btn-block" id="btn-sensitivity" disabled>🎯 计算元件敏感度</button>
+        <div id="sensitivity-feedback" class="error-panel hidden"></div>
+      </div>
+
       <button class="btn btn-primary btn-block" id="btn-solve">▶ 校核求解</button>
     </section>
 
@@ -195,6 +225,39 @@
             <span class="legend">等效方向：端口 p → n</span>
           </div>
           <div id="thevenin-card" class="thevenin-card"></div>
+        </div>
+      </div>
+
+      <div id="sensitivity-result" class="hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>元件敏感度分析（中心差分）</h2>
+            <span class="count" id="sensitivity-meta"></span>
+          </div>
+          <div id="sensitivity-summary" class="sens-summary"></div>
+          <div class="table-wrap">
+            <table class="grid result-grid" id="sensitivity-table">
+              <thead>
+                <tr>
+                  <th style="width:48px">排名</th>
+                  <th>元件</th>
+                  <th>类型</th>
+                  <th>基准参数</th>
+                  <th>负扰动目标</th>
+                  <th>正扰动目标</th>
+                  <th>导数 dF/dp</th>
+                  <th style="width:210px">归一化灵敏度 S</th>
+                  <th>状态 / 失败原因</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="hint">
+            S = (p/F₀)·dF/dp：元件参数每相对变化 1% 时目标值近似相对变化的百分数（负号表示反向变化）；
+            dF/dp 为中心差分得到的有量纲导数。目标基准值为 0 时 S 不可归一化，仅显示导数。
+            节点表变更后旧结果自动清空。
+          </p>
         </div>
       </div>
 
