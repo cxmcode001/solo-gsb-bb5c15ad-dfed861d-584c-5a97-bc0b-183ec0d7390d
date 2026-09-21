@@ -10,6 +10,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .sensitivity import (
+    SENSITIVITY_MAX_RATIO,
+    SENSITIVITY_MIN_RATIO,
+    sensitivity,
+)
 from .solver import CircuitError, MAX_ELEMENTS, MAX_NODES, solve
 from .sweep import SWEEP_MAX_POINTS, SWEEP_MIN_POINTS, sweep
 from .thevenin import thevenin_equivalent
@@ -17,7 +22,7 @@ from .thevenin import thevenin_equivalent
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
-app = FastAPI(title="直流网络校核器", version="1.2.0")
+app = FastAPI(title="直流网络校核器", version="1.3.0")
 
 
 async def _read_json_object(request: Request) -> tuple[dict[str, Any] | None, JSONResponse | None]:
@@ -89,6 +94,21 @@ async def api_thevenin(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content=result)
 
 
+@app.post("/api/sensitivity")
+async def api_sensitivity(request: Request) -> JSONResponse:
+    payload, bad = await _read_json_object(request)
+    if bad is not None:
+        return bad
+
+    try:
+        result = sensitivity(payload)
+    except CircuitError as exc:
+        # 422：分析参数非法、基准网络无唯一解（stage=baseline），
+        # 或目标不存在；单个元件的扰动失败内联在 200 响应中
+        return JSONResponse(status_code=422, content=exc.to_dict())
+    return JSONResponse(status_code=200, content=result)
+
+
 @app.get("/api/meta")
 async def api_meta() -> dict[str, Any]:
     return {
@@ -96,6 +116,8 @@ async def api_meta() -> dict[str, Any]:
         "max_elements": MAX_ELEMENTS,
         "sweep_min_points": SWEEP_MIN_POINTS,
         "sweep_max_points": SWEEP_MAX_POINTS,
+        "sensitivity_min_ratio": SENSITIVITY_MIN_RATIO,
+        "sensitivity_max_ratio": SENSITIVITY_MAX_RATIO,
         "element_types": [
             {"type": "R", "name": "电阻", "unit": "Ω"},
             {"type": "I", "name": "独立电流源", "unit": "A"},
